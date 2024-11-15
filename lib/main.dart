@@ -1,120 +1,270 @@
-import 'package:esc_pos_printer/esc_pos_printer.dart';
-import 'package:esc_pos_utils/src/capability_profile.dart';
-import 'package:esc_pos_utils/src/enums.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:blue_print_pos/blue_print_pos.dart';
+import 'package:blue_print_pos/models/models.dart';
+import 'package:blue_print_pos/receipt/receipt.dart';
 import 'package:flutter/material.dart';
-import 'package:esc_pos_printer/esc_pos_printer.dart' as flueP;
-import 'package:esc_pos_utils/esc_pos_utils.dart' as pos;
+import 'package:flutter/services.dart';
 
 void main() {
   runApp(MyApp());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
+  @override
+  _MyAppState createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  final BluePrintPos _bluePrintPos = BluePrintPos.instance;
+  List<BlueDevice> _blueDevices = <BlueDevice>[];
+  BlueDevice? _selectedDevice;
+  bool _isLoading = false;
+  int _loadingAtIndex = -1;
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: ThermalPrinterScreen(),
-    );
-  }
-}
-
-class ThermalPrinterScreen extends StatefulWidget {
-  @override
-  _ThermalPrinterScreenState createState() => _ThermalPrinterScreenState();
-}
-
-class _ThermalPrinterScreenState extends State<ThermalPrinterScreen> {
-  final TextEditingController _ipController = TextEditingController();
-
-  void _printSampleReceipt() async {
-    final String printerIp = _ipController.text;
-    final profile = await pos.CapabilityProfile.load();
-    final printer = flueP.NetworkPrinter(PaperSize.mm80, profile as CapabilityProfile);
-    final PosPrintResult res = await printer.connect(printerIp, port: 9100);
-    if (res == PosPrintResult.success) {
-      await _generateReceipt(printer);
-      printer.disconnect();
-    } else {
-      print('Could not connect to printer: $res');
-    }
-  }
-
-  Future<void> _generateReceipt(NetworkPrinter printer) async {
-    printer.text(
-      'Regular: aA bB cC dD eE fF gG hH iI jJ kK lL mM nN oO pP qQ rR sS tT uU vV wW xX yY zZ',
-    );
-    printer.text('Special 1: àÀ èÈ éÉ ûÛ üÜ çÇ ôÔ',
-        styles: const pos.PosStyles(codeTable: 'CP1252'));
-    printer.text('Special 2: blåbærgrød',
-        styles: const pos.PosStyles(codeTable: 'CP1252'));
-
-    printer.text('Bold text', styles: const pos.PosStyles(bold: true));
-    printer.text('Reverse text', styles: const pos.PosStyles(reverse: true));
-    printer.text('Underlined text',
-        styles: const pos.PosStyles(underline: true), linesAfter: 1);
-    printer.text('Align left', styles: const pos.PosStyles(align: PosAlign.left));
-    printer.text('Align center', styles: const pos.PosStyles(align: PosAlign.center));
-    printer.text('Align right',
-        styles: const pos.PosStyles(align: PosAlign.right), linesAfter: 1);
-
-    printer.row([
-      pos.PosColumn(
-        text: 'col3',
-        width: 3,
-        styles: const pos.PosStyles(align: PosAlign.center, underline: true),
-      ),
-      pos.PosColumn(
-        text: 'col6',
-        width: 6,
-        styles: const pos.PosStyles(align: PosAlign.center, underline: true),
-      ),
-      pos.PosColumn(
-        text: 'col3',
-        width: 3,
-        styles: const pos.PosStyles(align: PosAlign.center, underline: true),
-      ),
-    ]);
-
-    printer.text('Text size 200%',
-        styles: const pos.PosStyles(
-          height: PosTextSize.size2,
-          width: PosTextSize.size2,
-        ));
-
-    // Print barcode
-    final List<int> barData = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 4];
-    printer.barcode(pos.Barcode.upcA(barData));
-
-    printer.feed(2);
-    printer.cut();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Thermal Printer App'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            TextField(
-              controller: _ipController,
-              decoration: InputDecoration(
-                labelText: 'Printer IP Address',
-                hintText: 'e.g., 192.168.0.100',
-              ),
-              keyboardType: TextInputType.number,
-            ),
-            SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: _printSampleReceipt,
-              child: Text('Print Receipt'),
-            ),
-          ],
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Blue Print Pos'),
+        ),
+        body: SafeArea(
+          child: _isLoading && _blueDevices.isEmpty
+              ? const Center(
+                  child: CircularProgressIndicator(
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                  ),
+                )
+              : _blueDevices.isNotEmpty
+                  ? SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Column(
+                            children: List<Widget>.generate(_blueDevices.length,
+                                (int index) {
+                              return Row(
+                                children: <Widget>[
+                                  Expanded(
+                                    child: GestureDetector(
+                                      onTap: _blueDevices[index].address ==
+                                              (_selectedDevice?.address ?? '')
+                                          ? _onDisconnectDevice
+                                          : () => _onSelectDevice(index),
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(8.0),
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: <Widget>[
+                                            Text(
+                                              _blueDevices[index].name,
+                                              style: TextStyle(
+                                                color:
+                                                    _selectedDevice?.address ==
+                                                            _blueDevices[index]
+                                                                .address
+                                                        ? Colors.blue
+                                                        : Colors.black,
+                                                fontSize: 20,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                            Text(
+                                              _blueDevices[index].address,
+                                              style: TextStyle(
+                                                color:
+                                                    _selectedDevice?.address ==
+                                                            _blueDevices[index]
+                                                                .address
+                                                        ? Colors.blueGrey
+                                                        : Colors.grey,
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  if (_loadingAtIndex == index && _isLoading)
+                                    Container(
+                                      height: 24.0,
+                                      width: 24.0,
+                                      margin: const EdgeInsets.only(right: 8.0),
+                                      child: const CircularProgressIndicator(
+                                        valueColor:
+                                            AlwaysStoppedAnimation<Color>(
+                                          Colors.blue,
+                                        ),
+                                      ),
+                                    ),
+                                  if (!_isLoading &&
+                                      _blueDevices[index].address ==
+                                          (_selectedDevice?.address ?? ''))
+                                    TextButton(
+                                      onPressed: _onPrintReceipt,
+                                      child: Container(
+                                        color: _selectedDevice == null
+                                            ? Colors.grey
+                                            : Colors.blue,
+                                        padding: const EdgeInsets.all(8.0),
+                                        child: const Text(
+                                          'Test Print',
+                                          style: TextStyle(color: Colors.white),
+                                        ),
+                                      ),
+                                      style: ButtonStyle(
+                                        backgroundColor: MaterialStateProperty
+                                            .resolveWith<Color>(
+                                          (Set<MaterialState> states) {
+                                            if (states.contains(
+                                                MaterialState.pressed)) {
+                                              return Theme.of(context)
+                                                  .colorScheme
+                                                  .primary
+                                                  .withOpacity(0.5);
+                                            }
+                                            return Theme.of(context)
+                                                .primaryColor;
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              );
+                            }),
+                          ),
+                        ],
+                      ),
+                    )
+                  : Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: const <Widget>[
+                          Text(
+                            'Scan bluetooth device',
+                            style: TextStyle(fontSize: 24, color: Colors.blue),
+                          ),
+                          Text(
+                            'Press button scan',
+                            style: TextStyle(fontSize: 14, color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    ),
+        ),
+        floatingActionButton: FloatingActionButton(
+          onPressed: _isLoading ? null : _onScanPressed,
+          child: const Icon(Icons.search),
+          backgroundColor: _isLoading ? Colors.grey : Colors.blue,
         ),
       ),
     );
+  }
+
+  Future<void> _onScanPressed() async {
+    setState(() => _isLoading = true);
+    _bluePrintPos.scan().then((List<BlueDevice> devices) {
+      if (devices.isNotEmpty) {
+        setState(() {
+          _blueDevices = devices;
+          _isLoading = false;
+        });
+      } else {
+        setState(() => _isLoading = false);
+      }
+    });
+  }
+
+  void _onDisconnectDevice() {
+    _bluePrintPos.disconnect().then((ConnectionStatus status) {
+      if (status == ConnectionStatus.disconnect) {
+        setState(() {
+          _selectedDevice = null;
+        });
+      }
+    });
+  }
+
+  void _onSelectDevice(int index) {
+    setState(() {
+      _isLoading = true;
+      _loadingAtIndex = index;
+    });
+    final BlueDevice blueDevice = _blueDevices[index];
+    _bluePrintPos.connect(blueDevice).then((ConnectionStatus status) {
+      if (status == ConnectionStatus.connected) {
+        setState(() => _selectedDevice = blueDevice);
+      } else if (status == ConnectionStatus.timeout) {
+        _onDisconnectDevice();
+      } else {
+        print('$runtimeType - something wrong');
+      }
+      setState(() => _isLoading = false);
+    });
+  }
+
+  Future<void> _onPrintReceipt() async {
+    /// Example for Print Image
+    final ByteData logoBytes = await rootBundle.load(
+      'assets/logo.jpg',
+    );
+
+    /// Example for Print Text
+    final ReceiptSectionText receiptText = ReceiptSectionText();
+    receiptText.addImage(
+      base64.encode(Uint8List.view(logoBytes.buffer)),
+      width: 150,
+    );
+    receiptText.addSpacer();
+    receiptText.addText(
+      'MY STORE',
+      size: ReceiptTextSizeType.medium,
+      style: ReceiptTextStyleType.bold,
+    );
+    receiptText.addText(
+      'Black White Street, Jakarta, Indonesia',
+      size: ReceiptTextSizeType.small,
+    );
+    receiptText.addSpacer(useDashed: true);
+    receiptText.addLeftRightText('Time', '04/06/21, 10:00');
+    receiptText.addSpacer(useDashed: true);
+    receiptText.addLeftRightText(
+      'Apple 1kg',
+      'Rp30.000',
+      leftStyle: ReceiptTextStyleType.normal,
+      rightStyle: ReceiptTextStyleType.bold,
+    );
+    receiptText.addSpacer(useDashed: true);
+    receiptText.addLeftRightText(
+      'TOTAL',
+      'Rp30.000',
+      leftStyle: ReceiptTextStyleType.normal,
+      rightStyle: ReceiptTextStyleType.bold,
+    );
+    receiptText.addSpacer(useDashed: true);
+    receiptText.addLeftRightText(
+      'Payment',
+      'Cash',
+      leftStyle: ReceiptTextStyleType.normal,
+      rightStyle: ReceiptTextStyleType.normal,
+    );
+    receiptText.addSpacer(count: 2);
+
+    await _bluePrintPos.printReceiptText(receiptText);
+
+    /// Example for print QR
+    await _bluePrintPos.printQR('www.google.com', size: 250);
+
+    /// Text after QR
+    final ReceiptSectionText receiptSecondText = ReceiptSectionText();
+    receiptSecondText.addText('Powered by ayeee',
+        size: ReceiptTextSizeType.small);
+    receiptSecondText.addSpacer();
+    await _bluePrintPos.printReceiptText(receiptSecondText, feedCount: 1);
   }
 }
